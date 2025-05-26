@@ -1,0 +1,261 @@
+//@version=5
+indicator(title="Enhanced ProfitAlgo Indicator", shorttitle="EPA Indic.", overlay=true, format=format.price, precision=2)
+
+// ————— INPUTS —————
+// Smoothing
+grp_smooth = "Smoothing Settings"
+smooth_len1 = input.int(10, "Smoother Length 1", group=grp_smooth, minval=1, tooltip="Primary length for the price smoothing algorithm.")
+smooth_type = input.string("EMA", "Smoother Type", options=["EMA", "DEMA", "TEMA", "WMA", "SMA"], group=grp_smooth, tooltip="Type of moving average used for price smoothing.")
+
+// VWMA Bands
+grp_vwma = "VWMA Bands Settings"
+vwma_len = input.int(20, "VWMA Length", group=grp_vwma, minval=1, tooltip="Length for the Volume Weighted Moving Average.")
+vwma_band_mult = input.float(1.5, "VWMA Band Multiplier (ATR)", group=grp_vwma, minval=0.1, step=0.1, tooltip="ATR multiplier for VWMA band width.")
+
+// Price Volume Trend (PVT)
+grp_pvt = "PVT Settings"
+pvt_smooth_len = input.int(10, "PVT Smoothing Length", group=grp_pvt, minval=1, tooltip="Smoothing length for the Price Volume Trend indicator.")
+
+// ATR (for VWMA Bands & Potential SL/TP reference)
+grp_atr = "ATR Settings"
+atr_len = input.int(14, "ATR Length", group=grp_atr, minval=1, tooltip="Length for the Average True Range calculation.")
+sl_atr_mult_ref = input.float(2.0, "Ref SL ATR Multiplier", group=grp_atr, minval=0.1, step=0.1, tooltip="Reference ATR multiplier for potential Stop Loss level plotting.")
+tp1_rr_ref = input.float(1.5, "Ref TP1 R:R", group=grp_atr, minval=0.1, step=0.1, tooltip="Reference Risk:Reward ratio for potential Take Profit 1 level plotting.")
+tp2_rr_ref = input.float(3.0, "Ref TP2 R:R (Optional)", group=grp_atr, minval=0.1, step=0.1, tooltip="Reference Risk:Reward ratio for potential Take Profit 2. Set to 0 to disable.")
+
+
+// RSI
+grp_rsi = "RSI Settings"
+rsi_len = input.int(14, "RSI Length", group=grp_rsi, minval=1, tooltip="Length for the Relative Strength Index.")
+rsi_ob_level = input.int(70, "RSI Overbought Level", group=grp_rsi, minval=51, maxval=100, tooltip="RSI level considered overbought.")
+rsi_os_level = input.int(30, "RSI Oversold Level", group=grp_rsi, minval=0, maxval=49, tooltip="RSI level considered oversold.")
+
+// ADX (Regime Filter)
+grp_adx = "ADX Regime Filter Settings"
+adx_len = input.int(14, "ADX Length", group=grp_adx, minval=1, tooltip="Length for the ADX calculation (DI Length).")
+adx_smooth_len = input.int(14, "ADX Smoothing Length", group=grp_adx, minval=1, tooltip="Smoothing length for the ADX line itself.")
+adx_trend_threshold = input.int(20, "ADX Trend Minimum", group=grp_adx, minval=1, tooltip="ADX value above which a market is considered trending.")
+
+// Multi-Timeframe (MTF) Trend Confirmation
+grp_mtf = "MTF Trend Confirmation"
+mtf_enable = input.bool(true, "Enable MTF Trend Confirmation", group=grp_mtf, tooltip="If true, signals will consider the trend on a higher timeframe.")
+mtf_timeframe = input.timeframe("240", "MTF Timeframe", group=grp_mtf, tooltip="Higher timeframe for trend confirmation (e.g., 60, 240, D).")
+mtf_ema_len = input.int(50, "MTF EMA Length", group=grp_mtf, minval=1, tooltip="EMA length for MTF trend determination.")
+
+// Pivot Points (Traditional Daily)
+grp_pivot = "Pivot Point Settings"
+show_pivots = input.bool(true, "Show Pivot Points", group=grp_pivot, tooltip="Toggle visibility of pivot point levels.")
+
+// Signal Plotting
+grp_signal = "Signal Plotting"
+show_buy_sell_arrows = input.bool(true, "Show Buy/Sell Arrows", group=grp_signal)
+show_potential_sl_tp = input.bool(true, "Show Potential SL/TP on Signal", group=grp_signal, tooltip="Plots suggested SL/TP levels when a signal arrow appears.")
+
+
+// ————— FUNCTIONS —————
+// Generic MA function
+f_ma(source, length, type) =>
+    float result = na
+    if type == "EMA"
+        result := ta.ema(source, length)
+    else if type == "DEMA"
+        float ema1 = ta.ema(source, length)
+        result := 2 * ema1 - ta.ema(ema1, length)
+    else if type == "TEMA"
+        float ema1 = ta.ema(source, length)
+        float ema2 = ta.ema(ema1, length)
+        result := 3 * (ema1 - ema2) + ta.ema(ema2, length)
+    else if type == "WMA"
+        result := ta.wma(source, length)
+    else if type == "SMA"
+        result := ta.sma(source, length)
+    result
+
+// ————— CALCULATIONS —————
+// Smoothed Price
+smoothed_price = f_ma(close, smooth_len1, smooth_type)
+
+// ATR
+atr_val = ta.atr(atr_len)
+
+// VWMA & Bands
+vwma_val = ta.vwma(close, vwma_len)
+vwma_upper_band = vwma_val + atr_val * vwma_band_mult
+vwma_lower_band = vwma_val - atr_val * vwma_band_mult
+
+// PVT
+pvt_raw = ta.pvt // Built-in PVT
+pvt_val = ta.ema(pvt_raw, pvt_smooth_len)
+
+// RSI
+rsi_val = ta.rsi(close, rsi_len)
+
+// ADX
+[di_plus, di_minus, adx_line_raw] = ta.dmi(adx_len, adx_smooth_len)
+adx_val = adx_line_raw
+
+// MTF Trend
+mtf_close_raw = request.security(syminfo.tickerid, mtf_timeframe, close, lookahead = barmerge.lookahead_off)
+mtf_ema = ta.ema(mtf_close_raw, mtf_ema_len)
+mtf_is_uptrend = mtf_close_raw > mtf_ema
+mtf_is_downtrend = mtf_close_raw < mtf_ema
+
+// Pivot Points (Traditional Daily Pivots)
+pivot_high_prev_day = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pivot_low_prev_day = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_off)
+pivot_close_prev_day = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_off)
+
+pp = (pivot_high_prev_day + pivot_low_prev_day + pivot_close_prev_day) / 3
+r1 = 2 * pp - pivot_low_prev_day
+s1 = 2 * pp - pivot_high_prev_day
+r2 = pp + (pivot_high_prev_day - pivot_low_prev_day)
+s2 = pp - (pivot_high_prev_day - pivot_low_prev_day)
+r3 = pivot_high_prev_day + 2 * (pp - pivot_low_prev_day)
+s3 = pivot_low_prev_day - 2 * (pivot_high_prev_day - pp)
+
+
+// ————— TREND DEFINITION & REGIME —————
+is_trending_market = adx_val > adx_trend_threshold
+is_vwma_uptrend_indic = close > vwma_val // Condition for VWMA trend
+is_vwma_downtrend_indic = close < vwma_val // Condition for VWMA trend
+is_pvt_bullish_indic = pvt_val > pvt_val[1] and pvt_val[1] > pvt_val[2]
+is_pvt_bearish_indic = pvt_val < pvt_val[1] and pvt_val[1] < pvt_val[2]
+is_smoothed_price_rising_indic = smoothed_price > smoothed_price[1]
+is_smoothed_price_falling_indic = smoothed_price < smoothed_price[1]
+
+string market_trend_status = "Ranging / Weak Trend"
+if is_trending_market
+    if is_vwma_uptrend_indic and (not mtf_enable or mtf_is_uptrend)
+        market_trend_status := "Uptrend"
+    else if is_vwma_downtrend_indic and (not mtf_enable or mtf_is_downtrend)
+        market_trend_status := "Downtrend"
+
+
+// ————— SIGNAL CONDITIONS (FOR PLOTTING) —————
+// Long Signal Conditions
+long_cond_trend = market_trend_status == "Uptrend"
+long_cond_momentum = is_smoothed_price_rising_indic and is_pvt_bullish_indic
+long_cond_rsi = rsi_val < rsi_ob_level and rsi_val > rsi_os_level
+long_cond_price_action = close > vwma_lower_band
+// long_cond_pivot = close > s1
+
+buy_signal_condition = long_cond_trend and long_cond_momentum and long_cond_rsi and long_cond_price_action
+
+// Short Signal Conditions
+short_cond_trend = market_trend_status == "Downtrend"
+short_cond_momentum = is_smoothed_price_falling_indic and is_pvt_bearish_indic
+short_cond_rsi = rsi_val > rsi_os_level and rsi_val < rsi_ob_level
+short_cond_price_action = close < vwma_upper_band
+// short_cond_pivot = close < r1
+
+sell_signal_condition = short_cond_trend and short_cond_momentum and short_cond_rsi and short_cond_price_action
+
+// Persist signal state for SL/TP plotting
+var bool last_buy_signal = false
+var bool last_sell_signal = false
+var float signal_price = na
+var float potential_sl = na
+var float potential_tp1 = na
+var float potential_tp2 = na
+
+// Conditions for resetting SL/TP plots (simplified for indicator)
+bool reset_sl_tp_for_buy = last_buy_signal and (low < potential_sl or (not na(potential_tp1) and high > potential_tp1))
+bool reset_sl_tp_for_sell = last_sell_signal and (high > potential_sl or (not na(potential_tp1) and low < potential_tp1))
+bool should_reset_plots = reset_sl_tp_for_buy or reset_sl_tp_for_sell
+
+if buy_signal_condition and not last_buy_signal[1] // New buy signal
+    last_buy_signal := true
+    last_sell_signal := false
+    signal_price := close
+    potential_sl := signal_price - atr_val * sl_atr_mult_ref
+    potential_tp1 := signal_price + (signal_price - potential_sl) * tp1_rr_ref
+    if tp2_rr_ref > 0
+        potential_tp2 := signal_price + (signal_price - potential_sl) * tp2_rr_ref
+    else
+        potential_tp2 := na
+else if sell_signal_condition and not last_sell_signal[1] // New sell signal
+    last_sell_signal := true
+    last_buy_signal := false
+    signal_price := close
+    potential_sl := signal_price + atr_val * sl_atr_mult_ref
+    potential_tp1 := signal_price - (potential_sl - signal_price) * tp1_rr_ref
+    if tp2_rr_ref > 0
+        potential_tp2 := signal_price - (potential_sl - signal_price) * tp2_rr_ref
+    else
+        potential_tp2 := na
+else if should_reset_plots
+    // Reset if SL/TP1 would have been hit
+    last_buy_signal := false
+    last_sell_signal := false
+    signal_price := na
+    potential_sl := na
+    potential_tp1 := na
+    potential_tp2 := na
+
+
+// ————— PLOTTING —————
+// Smoothed Price
+plot(smoothed_price, "Smoothed Price", color=color.new(color.blue, 0), linewidth=2)
+
+// VWMA Bands
+plot(vwma_val, "VWMA", color=color.new(color.orange, 0), linewidth=1)
+vwma_upper_plot = plot(vwma_upper_band, "VWMA Upper Band", color=color.new(color.gray, 70), linewidth=1)
+vwma_lower_plot = plot(vwma_lower_band, "VWMA Lower Band", color=color.new(color.gray, 70), linewidth=1)
+fill(vwma_upper_plot, vwma_lower_plot, color=is_vwma_uptrend_indic ? color.new(color.green, 85) : color.new(color.red, 85), title="VWMA Trend Fill")
+
+// Pivot Points
+// Corrected to use timeframe.isdaily instead of the non-existent barstate.isdaily
+plot(show_pivots and timeframe.isdaily ? pp : na, "PP", color=color.new(color.yellow, 0), style=plot.style_linebr, linewidth=1)
+plot(show_pivots and timeframe.isdaily ? s1 : na, "S1", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)
+plot(show_pivots and timeframe.isdaily ? r1 : na, "R1", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1)
+plot(show_pivots and timeframe.isdaily ? s2 : na, "S2", color=color.new(color.green, 50), style=plot.style_linebr, linewidth=1)
+plot(show_pivots and timeframe.isdaily ? r2 : na, "R2", color=color.new(color.red, 50), style=plot.style_linebr, linewidth=1)
+// plot(show_pivots and timeframe.isdaily ? s3 : na, "S3", color=color.new(color.green, 70), style=plot.style_linebr, linewidth=1) // Optional S3/R3
+// plot(show_pivots and timeframe.isdaily ? r3 : na, "R3", color=color.new(color.red, 70), style=plot.style_linebr, linewidth=1)   // Optional S3/R3
+
+
+// RSI Overbought/Oversold lines
+// hline(rsi_ob_level, "RSI OB", color=color.new(color.red, 50), linestyle=hline.style_dashed)
+// hline(rsi_os_level, "RSI OS", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+
+// Buy/Sell Signal Arrows
+plotshape(show_buy_sell_arrows and buy_signal_condition and not last_buy_signal[1], title="Buy Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.arrowup, size=size.normal, text="BUY")
+plotshape(show_buy_sell_arrows and sell_signal_condition and not last_sell_signal[1], title="Sell Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.arrowdown, size=size.normal, text="SELL")
+
+// Plot Potential SL/TP levels if a signal is active
+plot(show_potential_sl_tp and (last_buy_signal or last_sell_signal) ? potential_sl : na, "Potential SL", color=color.new(color.red, 20), style=plot.style_cross, linewidth=2)
+plot(show_potential_sl_tp and (last_buy_signal or last_sell_signal) ? potential_tp1 : na, "Potential TP1", color=color.new(color.green, 20), style=plot.style_cross, linewidth=2)
+plot(show_potential_sl_tp and (last_buy_signal or last_sell_signal) and not na(potential_tp2) ? potential_tp2 : na, "Potential TP2", color=color.new(color.lime, 20), style=plot.style_cross, linewidth=2)
+
+// ————— ON-SCREEN TREND TABLE (Simple Version) —————
+var table trend_table = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast // Update table only on the last bar to save resources
+    table.cell(trend_table, 0, 0, "Market Monitor", bgcolor=color.new(color.blue, 70), text_color=color.white, width=10)
+    table.cell(trend_table, 1, 0, "Status", bgcolor=color.new(color.blue, 70), text_color=color.white, width=15)
+
+    table.cell(trend_table, 0, 1, "Overall Trend:", bgcolor=color.gray, text_color=color.black)
+    table.cell(trend_table, 1, 1, market_trend_status,
+         bgcolor = market_trend_status == "Uptrend" ? color.new(color.green,70) : market_trend_status == "Downtrend" ? color.new(color.red,70) : color.new(color.orange,70),
+         text_color=color.black)
+
+    table.cell(trend_table, 0, 2, "ADX Strength:", bgcolor=color.gray, text_color=color.black)
+    table.cell(trend_table, 1, 2, 
+         str.tostring(adx_val, "#.##") + (is_trending_market ? " (Trending)" : " (Ranging/Weak)"),
+         bgcolor=is_trending_market ? color.new(color.teal,80) : color.new(color.silver,80), 
+         text_color=color.black)
+
+    mtf_status_text = mtf_enable ? (mtf_is_uptrend ? "MTF Up" : mtf_is_downtrend ? "MTF Down" : "MTF Neutral") : "MTF Disabled"
+    mtf_status_color = mtf_enable ? (mtf_is_uptrend ? color.new(color.green,80) : mtf_is_downtrend ? color.new(color.red,80) : color.new(color.orange,80)) : color.new(color.gray,80)
+    table.cell(trend_table, 0, 3, "MTF Status:", bgcolor=color.gray, text_color=color.black)
+    table.cell(trend_table, 1, 3, mtf_status_text, bgcolor=mtf_status_color, text_color=color.black)
+
+    rsi_status_text = rsi_val > rsi_ob_level ? "Overbought (" + str.tostring(rsi_val, "#.##") + ")" : rsi_val < rsi_os_level ? "Oversold (" + str.tostring(rsi_val, "#.##") + ")" : "Neutral (" + str.tostring(rsi_val, "#.##") + ")"
+    rsi_status_color = rsi_val > rsi_ob_level ? color.new(color.purple, 70) : rsi_val < rsi_os_level ? color.new(color.aqua, 70) : color.new(color.gray, 70)
+    table.cell(trend_table, 0, 4, "RSI Status:", bgcolor=color.gray, text_color=color.black)
+    table.cell(trend_table, 1, 4, rsi_status_text, bgcolor=rsi_status_color, text_color=color.black)
+
+// ————— ALERTS —————
+alertcondition(buy_signal_condition and not last_buy_signal[1] and show_buy_sell_arrows, title="EPA Buy Signal", message="Enhanced ProfitAlgo Indicator: Potential BUY for {{ticker}} at {{close}}")
+alertcondition(sell_signal_condition and not last_sell_signal[1] and show_buy_sell_arrows, title="EPA Sell Signal", message="Enhanced ProfitAlgo Indicator: Potential SELL for {{ticker}} at {{close}}")
+alertcondition(market_trend_status != market_trend_status[1], title="EPA Trend Change", message="Enhanced ProfitAlgo Indicator: Market trend changed to {{market_trend_status}} for {{ticker}}")
+
